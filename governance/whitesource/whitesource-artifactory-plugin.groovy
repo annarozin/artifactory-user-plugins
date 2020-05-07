@@ -695,7 +695,7 @@ private String[] addPrefix(String[] values) {
 
 private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rkey, def config) {
     def artifactName = rpath.substring(rpath.lastIndexOf(BACK_SLASH) + 1)
-    String productName = config.productName != null ? config.productName : rkey
+    String productName = config.containsKey('productName') ? config.productName : rkey
     Collection<AgentProjectInfo> projects = createProjectWithOneDependency(sha1, artifactName, rkey)
     WhitesourceService whitesourceService = createWhiteSourceService(config)
     String userKey = null
