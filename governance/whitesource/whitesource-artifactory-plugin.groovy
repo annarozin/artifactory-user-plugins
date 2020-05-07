@@ -297,9 +297,10 @@ storage {
                     if (config.containsKey('userKey')) {
                         userKey = config.userKey
                     }
-                    CheckPolicyComplianceResult checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, repoKey, BLANK, projects, false, false, userKey)
+
+                    String productName = config.containsKey('productName') ? config.productName : repoKey
+                    CheckPolicyComplianceResult checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, productName, BLANK, projects, false, false, userKey)
                     if (checkPoliciesResult != null) {
-                        String productName = config.productName != null ? config.productName : repository
                         populateArtifactoryPropertiesTab(projects, config, repoKey, whitesourceService, sha1ToItemMap, checkPoliciesResult, productName, userKey)
                         log.info("New Item - {$item} was added to the repository")
                     }
@@ -703,7 +704,7 @@ private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rke
     }
     CheckPolicyComplianceResult checkPoliciesResult
     try {
-        checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, rkey, BLANK, projects, false, false, userKey)
+        checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, productName, BLANK, projects, false, false, userKey)
     } catch (Exception e) {
         log.error(e.getMessage())
     }
