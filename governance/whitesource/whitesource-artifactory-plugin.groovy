@@ -778,8 +778,8 @@ private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rke
                     name = child.getPolicy().getDisplayName()
                 }
             }
-            def status = 409
-//            def status = 403
+//            def status = 409
+            def status = 403
             def message = "'${artifactName}' artifact did not conform with WhiteSource policy '${name}'"
             log.warn message
             throw new CancelException(message, status)
