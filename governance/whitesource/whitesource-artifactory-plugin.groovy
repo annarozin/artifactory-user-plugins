@@ -15,6 +15,24 @@
  */
 
 
+/**
+ * WhiteSource Artifactory integration plugin
+ * Extracts descriptive information from artifacts located in Artifactory repositories and integrates them with WhiteSource.
+ *
+ * WhiteSource Artifactory plugin will check artifacts details against WhiteSource organization index and policies
+ * The plugin suggests populate information about each artifact in properties tab in Artifactory, As the following:
+ * Artifact matched policy data - policy action (approve/reject), and policy details as defined by the user in WhiteSource
+ *  1. WSS-Action - Policy Action
+ *  2. WSS-Policy-Details - Policy Details
+ * Additional data for the artifact:
+ * 1. WSS-Description - Artifact Description
+ * 2. WSS-HomePage - Artifact Home Page
+ * 3. WSS-Licenses - Artifact Licenses
+ * 4. WSS-Vulnerability:<Vulnerability-Id> - Artifact Vulnerability Link
+ * 5. WSS-Vulnerability-Severity:<Vulnerability-Id> - Artifact Vulnerability Severity
+ * 6. WSS-Vulnerability-Score:<Vulnerability-Id> - Artifact Vulnerability Score
+ */
+
 import groovy.transform.Field
 import org.artifactory.build.*
 import org.artifactory.common.*
@@ -43,14 +61,6 @@ import org.whitesource.agent.hash.ChecksumUtils
 import java.security.MessageDigest
 import static groovy.io.FileType.FILES
 
-@Field final String ACTION = 'WSS-Action'
-@Field final String POLICY_DETAILS = 'WSS-Policy-Details'
-@Field final String DESCRIPTION = 'WSS-Description'
-@Field final String HOME_PAGE_URL = 'WSS-Homepage'
-@Field final String LICENSES = 'WSS-Licenses'
-@Field final String VULNERABILITY = 'WSS-Vulnerability: '
-@Field final String VULNERABILITY_SEVERITY = 'WSS-Vulnerability-Severity: '
-@Field final String VULNERABILITY_SCORE = 'WSS-Vulnerability-Score: '
 @Field final String TEMP_DOWNLOAD_DIRECTORY = System.getProperty('java.io.tmpdir')
 @Field final String CVE_URL = 'https://cve.mitre.org/cgi-bin/cvename.cgi?name='
 @Field final String INCLUDES_REPOSITORY_CONTENT = 'includesRepositoryContent'
@@ -70,76 +80,101 @@ import static groovy.io.FileType.FILES
 @Field final String ACCEPT = 'Accept'
 @Field final int DEFAULT_CONNECTION_TIMEOUT_MINUTES = 60
 
-// file system scanner
-@Field final boolean CASE_SENSITIVE_GLOB = false
-@Field final boolean FOLLOW_SYMLINKS = false
+// Artifactory Properties
+@Field final String ACTION = 'WSS-Action'
+@Field final String POLICY_DETAILS = 'WSS-Policy-Details'
+@Field final String DESCRIPTION = 'WSS-Description'
+@Field final String HOME_PAGE_URL = 'WSS-Homepage'
+@Field final String LICENSES = 'WSS-Licenses'
+@Field final String VULNERABILITY = 'WSS-Vulnerability: '
+@Field final String VULNERABILITY_SEVERITY = 'WSS-Vulnerability-Severity: '
+@Field final String VULNERABILITY_SCORE = 'WSS-Vulnerability-Score: '
+
+// File System Scanner
 @Field final int ARCHIVE_EXTRACTION_DEPTH_DEFAULT = 2
 @Field final int ARCHIVE_EXTRACTION_DEPTH_MIN = 1
 @Field final int ARCHIVE_EXTRACTION_DEPTH_MAX = 7
-@Field final boolean PARTIAL_SHA1_MATCH = false
-@Field final String GLOB_PATTERN_PREFIX = '**/*'
 @Field final String PREFIX = '**/*.'
 @Field final String BACK_SLASH = '/'
 
+// Repositories Types
 @Field final String REMOTE = 'remote'
 @Field final String VIRTUAL = 'virtual'
+
+// Properties File Parameters
+@Field final String USER_KEY = 'userKey'
+@Field final String PRODUCT_NAME = 'productName'
+@Field final String MAX_REPO_UPLOAD_WSS_SIZE = 'maxRepoUploadWssSize'
+@Field final String MAX_REPO_SCAN_SIZE = 'maxRepoScanSize'
+@Field final String TRIGGER_AFTER_CREATE = 'triggerAfterCreate'
+@Field final String TRIGGER_BEFORE_DOWNLOAD = 'triggerBeforeDownload'
 
 @Field final String[] ARCHIVE_INCLUDES_DEFAULT = ["jar", "war", "ear", "egg", "zip", "whl", "sca", "sda", "gem",
                                                   "tar.gz", "tar", "tgz", "tar.bz2", "rpm", "rar"]
 
 /**
- * This is a plug-in that integrates Artifactory with WhiteSource
- * Extracts descriptive information from your open source libraries located in the Artifactory repositories
- * and integrates them with WhiteSource.
- *
- * The plugin will check each item details against the organizational policies
- * Check policies suggests information about the action (approve/reject),
- * and policy details as defined by the user in WhiteSource(for example : Approve some license)
- *  1. WSS-Action
- *  2. WSS-Policy-Details
- * Additional data for the item will be populated in your Artifactory property tab :
- * 1. WSS-Description
- * 2. WSS-HomePage
- * 3. WSS-Licenses
- * 4. WSS-Vulnerabilities
+ * In case triggerBeforeDownload is enabled run the following 'beforeDownloadRequest' method.
+ * This method will check policies for downloaded artifact
  */
-
 download {
-
     beforeDownloadRequest { request, repoPath ->
         def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
         def triggerBeforeDownload = true
-        def archiveExtractionDepth = config.containsKey(ARCHIVE_EXTRACTION_DEPTH) ? config.get(ARCHIVE_EXTRACTION_DEPTH) : ARCHIVE_EXTRACTION_DEPTH_DEFAULT
-        if (config.containsKey('triggerBeforeDownload')) {
+
+        // Check if trigger before download is enabled in properties file
+        if (config.containsKey(TRIGGER_BEFORE_DOWNLOAD)) {
             triggerBeforeDownload = config.triggerBeforeDownload
         }
+
         if (triggerBeforeDownload) {
-            def rpath = repoPath.path
-            def rkey = repoPath.repoKey
-            // get the url of the remote repo
-            def repositoryConf = repositories.getRepositoryConfiguration(rkey)
-            def type = repositoryConf.type
-            String sha1
             try {
-                if (REMOTE.equals(type)) {
-                    // get remote repo artifact sha1
-                    sha1 = getRemoteRepoFileSha1(repositoryConf, rpath)
-                    createProjectAndCheckPolicyForDownload(rpath, sha1, rkey, config)
-                } else if (VIRTUAL.equals(type)) {
-                    // get virtual repo artifact sha1
-                    log.info("Virtual repo is currently not supported")
+                log.info("Before download request scan started")
+                def repositoryPath = repoPath.path
+                def repositoryKey = repoPath.repoKey
+
+                def repositoryConf = repositories.getRepositoryConfiguration(repositoryKey)
+                def repositoryType = repositoryConf.type
+
+                if (VIRTUAL.equals(repositoryType)) {
+                    // UA doesnt support download from  virtual repository
+                    log.info("WhiteSource scan artifact before download - Virtual repository is currently not supported")
                 } else {
-                    // get local repo artifact sha1
-                    def repository = RepoPathFactory.create(rkey)
+                    // Get local repository artifacts sha1
+                    def repository = RepoPathFactory.create(repositoryKey)
                     List<ItemInfo> items = new ArrayList<>()
-                    getRelevantItemSha1(repository, rpath.substring(rpath.lastIndexOf(BACK_SLASH) + 1), items)
+                    getRelevantItemSha1(repository, repositoryPath.substring(repositoryPath.lastIndexOf(BACK_SLASH) + 1), items)
                     if (!items.isEmpty()) {
-                        sha1 = repositories.getFileInfo(items.get(0).getRepoPath()).getChecksumsInfo().getSha1()
-                        createProjectAndCheckPolicyForDownload(rpath, sha1, rkey, config)
+                        String sha1 = repositories.getFileInfo(items.get(0).getRepoPath()).getChecksumsInfo().getSha1()
+                        createProjectAndCheckPolicyForDownload(repositoryPath, sha1, repositoryKey, config)
                     }
                 }
-            } catch (Exception e) {
-                log.warn("Failed to get dependency" + e)
+            } finally {
+                log.info("Before download request scan finished")
+            }
+        }
+    }
+
+    beforeRemoteDownload { request, repoPath ->
+        def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
+        def triggerBeforeDownload = true
+
+        // Check if trigger before download is enabled in properties file
+        if (config.containsKey(TRIGGER_BEFORE_DOWNLOAD)) {
+            triggerBeforeDownload = config.triggerBeforeDownload
+        }
+
+        if (triggerBeforeDownload) {
+            try {
+                log.info("Before remote download request scan started")
+                def rpath = repoPath.path
+                def rkey = repoPath.repoKey
+
+                // Get remote repository artifacts sha1
+                def repositoryConf = repositories.getRepositoryConfiguration(rkey)
+                String sha1 = getRemoteRepoFileSha1(repositoryConf, rpath)
+                createProjectAndCheckPolicyForDownload(rpath, sha1, rkey, config)
+            } finally {
+                log.info("Before remote download request scan finished")
             }
         }
     }
@@ -148,7 +183,7 @@ download {
 jobs {
     /**
      * How to set cron execution:
-     * cron (java.lang.String) - A valid cron expression used to schedule job runs (see: http://www.quartz-scheduler.org/docs/tutorial/TutorialLesson06.html)
+     * cron (java.lang.String) - A valid cron expression used to schedule job runs
      * 1 - Seconds , 2 - Minutes, 3 - Hours, 4 - Day-of-Month , 5- Month, 6 - Day-of-Week, 7 - Year (optional field).
      * Example :
      * "0 42 9 * * ?"  - Build a trigger that will fire daily at 9:42 am
@@ -186,7 +221,7 @@ jobs {
             for (String repository : repositories) {
                 List<ItemInfo> archiveFilesList = new ArrayList<>()
                 Map<String, WssItemInfo> sha1ToItemMap = new HashMap<String, WssItemInfo>()
-                String productName = config.containsKey('productName') ? config.productName : repository
+                String productName = config.containsKey(PRODUCT_NAME) ? config.productName : repository
 
                 // Get all repository files/content, fill them in sha1ToItemMap.
                 // If file is archive then it will be added to archiveFilesList to extract it later
@@ -196,8 +231,11 @@ jobs {
                 archiveFilesList.clear() // clear list - it's not used after this step
 
                 int repoSize = sha1ToItemMap.size()
-                int maxRepoScanSize = config.containsKey('maxRepoScanSize') ? config.maxRepoScanSize > 0 ? config.maxRepoScanSize : MAX_REPO_SIZE : MAX_REPO_SIZE
-                int maxRepoUploadWssSize = config.containsKey('maxRepoUploadWssSize') ? config.maxRepoUploadWssSize > 0 ? config.maxRepoUploadWssSize : MAX_REPO_SIZE_TO_UPLOAD : MAX_REPO_SIZE_TO_UPLOAD
+                int maxRepoScanSize = config.containsKey(MAX_REPO_SCAN_SIZE) ? config.maxRepoScanSize > 0 ?
+                        config.maxRepoScanSize : MAX_REPO_SIZE : MAX_REPO_SIZE
+                int maxRepoUploadWssSize = config.containsKey(MAX_REPO_UPLOAD_WSS_SIZE) ?
+                        config.maxRepoUploadWssSize > 0 ? config.maxRepoUploadWssSize : MAX_REPO_SIZE_TO_UPLOAD
+                        : MAX_REPO_SIZE_TO_UPLOAD
                 if (repoSize > maxRepoScanSize) {
                     log.warn("The max repository size for check policies in WhiteSource is : ${maxRepoScanSize} items, Job Exiting")
                 } else if (repoSize == 0) {
@@ -209,13 +247,11 @@ jobs {
                     WhitesourceService service = createWhiteSourceService(config)
 
                     // update WhiteSource with repositories
-                    String userKey = null
-                    if (config.containsKey('userKey')) {
-                        userKey = config.userKey
-                    }
+                    String userKey = getUserKeyFromPropertiesFile(config, USER_KEY)
 
                     if (config.checkPolicies) {
-                        checkPoliciesResult = checkPolicies(service, config.apiKey, productName, BLANK, projects, config.forceCheckAllDependencies, config.forceUpdate, userKey)
+                        checkPoliciesResult = checkPolicies(service, config.apiKey, productName, BLANK, projects,
+                                config.forceCheckAllDependencies, config.forceUpdate, userKey)
                         if (checkPoliciesResult == null) {
                             break
                         }
@@ -276,33 +312,44 @@ storage {
     afterCreate { item ->
         try {
             if (!item.isFolder()) {
-                def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
                 def triggerAfterCreate = true
+                def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
+
                 def archiveExtractionDepth = config.containsKey(ARCHIVE_EXTRACTION_DEPTH) ? config.get(ARCHIVE_EXTRACTION_DEPTH) : ARCHIVE_EXTRACTION_DEPTH_DEFAULT
                 archiveExtractionDepth = verifyArchiveExtractionDepth(archiveExtractionDepth)
 
-                if (config.containsKey('triggerAfterCreate')) {
+                if (config.containsKey(TRIGGER_AFTER_CREATE)) {
                     triggerBeforeDownload = config.triggerAfterCreate
                 }
-                if (triggerAfterCreate) {
-                    Map<String, WssItemInfo> sha1ToItemMap = new HashMap<String, WssItemInfo>()
-                    sha1ToItemMap.put(repositories.getFileInfo(item.getRepoPath()).getChecksumsInfo().getSha1(), new WssItemInfo(item.getName(), item.getRepoPath()))
-                    List<File> fileList = new ArrayList<>()
-                    String[] includesRepositoryContent = []
-                    Set<String> allowedFileExtensions = new HashSet<String>()
-                    def repoKey = item.getRepoKey()
-                    Collection<AgentProjectInfo> projects = createProjects(sha1ToItemMap, repoKey, fileList, includesRepositoryContent, allowedFileExtensions, archiveExtractionDepth)
-                    WhitesourceService whitesourceService = createWhiteSourceService(config)
-                    String userKey = null
-                    if (config.containsKey('userKey')) {
-                        userKey = config.userKey
-                    }
 
-                    String productName = config.containsKey('productName') ? config.productName : repoKey
-                    CheckPolicyComplianceResult checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, productName, BLANK, projects, false, false, userKey)
-                    if (checkPoliciesResult != null) {
-                        populateArtifactoryPropertiesTab(projects, config, repoKey, whitesourceService, sha1ToItemMap, checkPoliciesResult, productName, userKey)
-                        log.info("New Item - {$item} was added to the repository")
+                // Verify trigger after create is enabled in properties file
+                if (triggerAfterCreate) {
+
+                    try {
+                        log.info("After create request scan started")
+                        Map<String, WssItemInfo> sha1ToItemMap = new HashMap<String, WssItemInfo>()
+                        sha1ToItemMap.put(repositories.getFileInfo(item.getRepoPath()).getChecksumsInfo().getSha1(), new WssItemInfo(item.getName(), item.getRepoPath()))
+
+                        List<File> fileList = new ArrayList<>()
+                        String[] includesRepositoryContent = []
+                        Set<String> allowedFileExtensions = new HashSet<String>()
+                        def repoKey = item.getRepoKey()
+                        Collection<AgentProjectInfo> projects = createProjects(sha1ToItemMap, repoKey, fileList,
+                                includesRepositoryContent, allowedFileExtensions, archiveExtractionDepth)
+
+                        WhitesourceService whitesourceService = createWhiteSourceService(config)
+
+                        String userKey = getUserKeyFromPropertiesFile(config, USER_KEY)
+                        String productName = config.containsKey(PRODUCT_NAME) ? config.productName : repoKey
+                        CheckPolicyComplianceResult checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, productName, BLANK, projects, false, false, userKey)
+
+                        // Populate policies result to artifactory artifact properties
+                        if (checkPoliciesResult != null) {
+                            populateArtifactoryPropertiesTab(projects, config, repoKey, whitesourceService, sha1ToItemMap, checkPoliciesResult, productName, userKey)
+                            log.info("New Item - {$item} was added to the repository")
+                        }
+                    } finally {
+                        log.info("After create request scan finished")
                     }
                 }
             }
@@ -310,6 +357,13 @@ storage {
             log.warn("Error creating WhiteSource Service " + e)
         }
     }
+}
+
+private String getUserKeyFromPropertiesFile(ConfigObject config, String USER_KEY) {
+    if (config.containsKey(USER_KEY)) {
+        return config.userKey
+    }
+    return null
 }
 
 /* --- Private Methods --- */
@@ -529,8 +583,8 @@ private Collection<AgentProjectInfo> createProjects(Map<String, WssItemInfo> sha
                             DependencyInfo childDependencyInfo = new DependencyInfo(fileSha1)
                             childDependencyInfo.setArtifactId(it.name)
                             dependencyInfo.getChildren().add(childDependencyInfo)
-                        } catch (Exception e){
-                            log.warn("Failed to calculate sha1 for '"+ it.name+"'")
+                        } catch (Exception e) {
+                            log.warn("Failed to calculate sha1 for '" + it.name + "'")
                         }
                     }
                 }
@@ -544,27 +598,35 @@ private Collection<AgentProjectInfo> createProjects(Map<String, WssItemInfo> sha
     return projects
 }
 
-private CheckPolicyComplianceResult checkPolicies(WhitesourceService service, String orgToken, String product, String productVersion,
-                                                  Collection<AgentProjectInfo> projects, boolean forceCheckAllDependencies, boolean forceUpdate, String userKey) {
-    log.info("Checking policies")
-    CheckPolicyComplianceResult checkPoliciesResult = null
+private CheckPolicyComplianceResult checkWhiteSourceServicePolicyCompliance(WhitesourceService service, String orgToken, String product, String productVersion,
+                                                                            Collection<AgentProjectInfo> projects, boolean forceCheckAllDependencies, String userKey) {
     try {
-        CheckPolicyComplianceRequest policyComplianceRequest = new CheckPolicyComplianceRequest(orgToken, product, productVersion, projects, forceCheckAllDependencies, userKey,
-                null, null, null)
-        checkPoliciesResult = service.checkPolicyCompliance(policyComplianceRequest)
+        CheckPolicyComplianceRequest policyComplianceRequest = new CheckPolicyComplianceRequest(orgToken, product,
+                productVersion, projects, forceCheckAllDependencies, userKey, null, null, null)
+        return service.checkPolicyCompliance(policyComplianceRequest)
     } catch (Exception e) {
-        log.error(e.getMessage())
+        log.error("WhiteSource plugin failed during check policies process, Error: ${e.getMessage()}")
         return null
     }
+}
+
+private CheckPolicyComplianceResult checkPolicies(WhitesourceService service, String orgToken, String product,
+                                                  String productVersion, Collection<AgentProjectInfo> projects,
+                                                  boolean forceCheckAllDependencies, boolean forceUpdate, String userKey) {
+    log.info("Checking policies")
+    CheckPolicyComplianceResult checkPoliciesResult = checkWhiteSourceServicePolicyCompliance(service, orgToken, product,
+            productVersion, projects, forceCheckAllDependencies, userKey)
+
     if (checkPoliciesResult != null) {
         boolean hasRejections = checkPoliciesResult.hasRejections()
+
         if (hasRejections && !forceUpdate) {
-            log.info("Some dependencies did not conform with open source policies")
-            log.info("=== UPDATE ABORTED ===")
+            log.info("Some dependencies did not conform with WhiteSource policies")
+            log.info("Update WhiteSource organization was aborted")
         } else {
-            String message = hasRejections ? "Some dependencies violate open source policies, however all were force " +
-                    "updated to organization inventory." :
-                    "All dependencies conform with open source policies."
+            log.info("All dependencies were updated in WhiteSource organization")
+            String message = hasRejections ? "Some dependencies did not conform with WhiteSource policies" :
+                    "All dependencies conform with WhiteSource policies"
             log.info(message)
         }
     }
@@ -607,7 +669,8 @@ private void checkAndSetProxySettings(WhitesourceService whitesourceService, def
 }
 
 private void logResult(UpdateInventoryResult updateResult) {
-    StringBuilder resultLogMsg = new StringBuilder("Inventory update results for ").append(updateResult.getOrganization()).append("\n")
+    StringBuilder resultLogMsg = new StringBuilder("Inventory update results for ")
+            .append(updateResult.getOrganization()).append("\n")
     // newly created projects
     Collection<String> createdProjects = updateResult.getCreatedProjects()
     if (createdProjects.isEmpty()) {
@@ -695,22 +758,18 @@ private String[] addPrefix(String[] values) {
 
 private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rkey, def config) {
     def artifactName = rpath.substring(rpath.lastIndexOf(BACK_SLASH) + 1)
-    String productName = config.containsKey('productName') ? config.productName : rkey
-    Collection<AgentProjectInfo> projects = createProjectWithOneDependency(sha1, artifactName, rkey)
+    String productName = config.containsKey(PRODUCT_NAME) ? config.productName : rkey
+    Collection<AgentProjectInfo> projects = createProjectObjectWithOneDependency(sha1, artifactName, rkey)
     WhitesourceService whitesourceService = createWhiteSourceService(config)
-    String userKey = null
-    if (config.containsKey('userKey')) {
-        userKey = config.userKey
-    }
-    CheckPolicyComplianceResult checkPoliciesResult
-    try {
-        checkPoliciesResult = checkPolicies(whitesourceService, config.apiKey, productName, BLANK, projects, false, false, userKey)
-    } catch (Exception e) {
-        log.error(e.getMessage())
-    }
+    String userKey = getUserKeyFromPropertiesFile(config, USER_KEY)
+
+    log.info("Checking policies")
+    CheckPolicyComplianceResult checkPoliciesResult = checkWhiteSourceServicePolicyCompliance(whitesourceService, config.apiKey,
+            productName, BLANK, projects, false, userKey)
+
     def name = ''
     if (checkPoliciesResult != null) {
-        if (checkPoliciesResult.hasRejections() == true) {
+        if (checkPoliciesResult.hasRejections()) {
             def project = checkPoliciesResult.getNewProjects()
             for (String key : project.keySet()) {
                 PolicyCheckResourceNode policyCheckResourceNode = project.get(key)
@@ -721,23 +780,18 @@ private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rke
             }
             def status = 409
 //            def status = 403
-            def message = "${artifactName} did not conform with open source policies :  ${name}"
+            def message = "'${artifactName}' artifact did not conform with WhiteSource policy '${name}'"
             log.warn message
             throw new CancelException(message, status)
-//            {
-//                public Throwable fillInStackTrace() {
-////                    return
-//                }
-//
-//            }
         } else {
-            def message = "All the epolicies comform with  :  ${artifactName}"
-            log.info message
+            log.info("WhiteSource policies conform with artifact '${artifactName}'");
         }
+    } else {
+        log.error("Check policies result is null")
     }
 }
 
-private Collection<AgentProjectInfo> createProjectWithOneDependency(String sha1, String fileName, String repoName) {
+private Collection<AgentProjectInfo> createProjectObjectWithOneDependency(String sha1, String fileName, String repoName) {
     Collection<AgentProjectInfo> projects = new ArrayList<AgentProjectInfo>()
     AgentProjectInfo projectInfo = new AgentProjectInfo()
     projects.add(projectInfo)
@@ -812,7 +866,6 @@ private void getRelevantItemSha1(def repository, def fileName, List<ItemInfo> it
             }
         }
     }
-    return
 }
 
 private int verifyArchiveExtractionDepth(int archiveExtractionDepth) {
@@ -829,6 +882,7 @@ private int verifyArchiveExtractionDepth(int archiveExtractionDepth) {
 /*
  * Internal class
  */
+
 class WssItemInfo {
     String name
     RepoPath repoPath
