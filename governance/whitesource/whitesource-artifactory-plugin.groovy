@@ -118,13 +118,9 @@ import static groovy.io.FileType.FILES
  */
 download {
     beforeDownloadRequest { request, repoPath ->
-        def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
-        def triggerBeforeDownload = true
-
-        // Check if trigger before download is enabled in properties file
-        if (config.containsKey(TRIGGER_BEFORE_DOWNLOAD)) {
-            triggerBeforeDownload = config.triggerBeforeDownload
-        }
+        def etcDir = getEtcDirectory()
+        def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
+        boolean triggerBeforeDownload = isTriggerBeforeDownloadEnabled(config)
 
         if (triggerBeforeDownload) {
             try {
@@ -155,13 +151,9 @@ download {
     }
 
     beforeRemoteDownload { request, repoPath ->
-        def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
-        def triggerBeforeDownload = true
-
-        // Check if trigger before download is enabled in properties file
-        if (config.containsKey(TRIGGER_BEFORE_DOWNLOAD)) {
-            triggerBeforeDownload = config.triggerBeforeDownload
-        }
+        def etcDir = getEtcDirectory()
+        def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
+        boolean triggerBeforeDownload = isTriggerBeforeDownloadEnabled(config)
 
         if (triggerBeforeDownload) {
             try {
@@ -180,6 +172,31 @@ download {
     }
 }
 
+private def isTriggerBeforeDownloadEnabled(config) {
+    def triggerBeforeDownload = true
+
+    // Check if trigger before download is enabled in properties file
+    if (config.containsKey(TRIGGER_BEFORE_DOWNLOAD)) {
+        triggerBeforeDownload = config.triggerBeforeDownload
+    }
+    triggerBeforeDownload
+}
+
+private def getEtcDirectory() {
+    // Before Artifactory 7.x the etc directory parameter name was 'haAwareEtcDir'
+    // In Artifactory 7.x and up it was changed to etcDir
+    def etcDir
+    def artifactoryVersion = ctx.versionProvider.originalHomeVersion.version.version
+    boolean isArtifactoryVersion7 = artifactoryVersion.startsWith("7.")
+    if (isArtifactoryVersion7) {
+        etcDir = ctx.artifactoryHome.etcDir
+    } else {
+        etcDir = ctx.artifactoryHome.haAwareEtcDir
+    }
+
+    etcDir
+}
+
 jobs {
     /**
      * How to set cron execution:
@@ -193,7 +210,8 @@ jobs {
             log.info("Starting job updateRepoWithWhiteSource By WhiteSource")
 
             // Get config properties from 'plugins/whitesource-artifactory-plugin.properties'
-            def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
+            def etcDir = getEtcDirectory()
+            def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
             CheckPolicyComplianceResult checkPoliciesResult = null
 
             // Get artifactory repositories names to scan from config file
@@ -313,7 +331,8 @@ storage {
         try {
             if (!item.isFolder()) {
                 def triggerAfterCreate = true
-                def config = new ConfigSlurper().parse(new File(ctx.artifactoryHome.haAwareEtcDir, PROPERTIES_FILE_PATH).toURL())
+                def etcDir = getEtcDirectory()
+                def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
 
                 def archiveExtractionDepth = config.containsKey(ARCHIVE_EXTRACTION_DEPTH) ? config.get(ARCHIVE_EXTRACTION_DEPTH) : ARCHIVE_EXTRACTION_DEPTH_DEFAULT
                 archiveExtractionDepth = verifyArchiveExtractionDepth(archiveExtractionDepth)
