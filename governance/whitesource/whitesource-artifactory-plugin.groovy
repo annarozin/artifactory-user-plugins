@@ -67,7 +67,7 @@ import static groovy.io.FileType.FILES
 
 @Field final String PROPERTIES_FILE_PATH = 'plugins/whitesource-artifactory-plugin.properties'
 @Field final String AGENT_TYPE = 'artifactory-plugin'
-@Field final String PLUGIN_VERSION = '20.9.1'
+@Field final String PLUGIN_VERSION = '21.4.1'
 @Field final String AGENT_VERSION = '2.9.9.17'
 @Field final String ARCHIVE_EXTRACTION_DEPTH = 'archiveExtractionDepth'
 @Field final String OR = '|'
@@ -162,8 +162,7 @@ download {
                 def rkey = repoPath.repoKey
 
                 // Get remote repository artifacts sha1
-                def repositoryConf = repositories.getRepositoryConfiguration(rkey)
-                String sha1 = getRemoteRepoFileSha1(repositoryConf, rpath)
+                String sha1 = getRemoteRepoFileSha1(rpath, rkey)
                 createProjectAndCheckPolicyForDownload(rpath, sha1, rkey, config)
             } finally {
                 log.info("Before remote download request scan finished")
@@ -823,35 +822,44 @@ private Collection<AgentProjectInfo> createProjectObjectWithOneDependency(String
     return projects
 }
 
-private String getRemoteRepoFileSha1(def conf, def rpath) {
-    def url = conf.url
-    if (!url.endsWith('/')) url += '/'
-    url += rpath
-    // get the remote authorization data
-    def auth = "$conf.username:$conf.password".bytes.encodeBase64()
-    def conn = null, istream = null, realchecksum = null
-    try {
-        // open a connection to the remote
-        conn = new URL(url).openConnection()
-        conn.setRequestMethod('HEAD')
-        conn.setRequestProperty('Authorization', "Basic $auth")
-        // don't modify the path if this file already exists on the far end
-    } finally {
-        // close everything
-        istream?.close()
-        conn?.disconnect()
+/**
+ * Get remote repository proxy
+ * Return null proxy is not configured in remote repository
+ * @param rkey repository key/name
+ * @return Remote repository proxy
+ */
+private Proxy getRemoteRepoProxy(def rkey) {
+    def proxyDescriptor = ctx.centralConfig.descriptor.remoteRepositoriesMap.get(rkey).proxy
+    if (proxyDescriptor != null) {
+        Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyDescriptor.host, proxyDescriptor.port))
+        return proxy
     }
+    return null
+}
+
+private String getRemoteRepoFileSha1(def rpath, def rkey) {
+    def repositoryConf = repositories.getRepositoryConfiguration(rkey)
+
+    // get the remote authorization data
+    def auth = "$repositoryConf.username:$repositoryConf.password".bytes.encodeBase64()
+    def conn = null, istream = null, realchecksum = null
+
     // operation, attempt to pull the checksum from the far end
     // get the url of the remote repo
-    url = conf.url
+    def url = repositoryConf.url
     if (!url.endsWith('/')) url += '/'
     url += rpath
-    // get the remote authorization data
-    conn = null
-    istream = null
+
+    // Get remote repository proxy if exist
+    Proxy repoProxy = getRemoteRepoProxy(rkey)
+
     try {
         // open a connection to the remote
-        conn = new URL(url).openConnection()
+        if (repoProxy == null) {
+            conn = new URL(url).openConnection()
+        } else {
+            conn = new URL(url).openConnection(repoProxy)
+        }
         conn.setRequestProperty('Authorization', "Basic $auth")
         // don't modify the path if the source file does not exist
         def response = conn.responseCode
