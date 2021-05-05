@@ -67,8 +67,8 @@ import static groovy.io.FileType.FILES
 
 @Field final String PROPERTIES_FILE_PATH = 'plugins/whitesource-artifactory-plugin.properties'
 @Field final String AGENT_TYPE = 'artifactory-plugin'
-@Field final String PLUGIN_VERSION = '21.4.1'
-@Field final String AGENT_VERSION = '2.9.9.17'
+@Field final String PLUGIN_VERSION = '21.5.1'
+@Field final String AGENT_VERSION = '2.9.9.65'
 @Field final String ARCHIVE_EXTRACTION_DEPTH = 'archiveExtractionDepth'
 @Field final String OR = '|'
 @Field final int MAX_REPO_SIZE = 10000
