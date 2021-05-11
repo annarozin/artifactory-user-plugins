@@ -46,31 +46,26 @@ import org.artifactory.repo.RepoPathFactory
 import org.artifactory.request.*
 import org.artifactory.resource.*
 import org.artifactory.util.*
-import org.whitesource.agent.api.dispatch.CheckPolicyComplianceRequest
-import org.whitesource.agent.api.dispatch.CheckPolicyComplianceResult
-import org.whitesource.agent.api.dispatch.GetDependencyDataResult
-import org.whitesource.agent.api.dispatch.UpdateInventoryRequest
-import org.whitesource.agent.api.dispatch.UpdateInventoryResult
+import org.whitesource.agent.api.dispatch.*
 import org.whitesource.agent.api.model.*
 import org.whitesource.agent.client.WhitesourceService
-
-import org.whitesource.agent.api.dispatch.GetDependencyDataRequest
-import org.whitesource.utils.archive.ArchiveExtractor
 import org.whitesource.agent.hash.ChecksumUtils
+import org.whitesource.utils.archive.ArchiveExtractor
 
+import java.nio.file.Paths
 import java.security.MessageDigest
+
 import static groovy.io.FileType.FILES
 
-@Field final String TEMP_DOWNLOAD_DIRECTORY = System.getProperty('java.io.tmpdir')
+@Field final String TEMP_DIRECTORY = System.getProperty('java.io.tmpdir')
+@Field final String TEMP_ARTIFACTORY_DIRECTORY = Paths.get(TEMP_DIRECTORY, "WhitesourceArtifactoryPlugin").toString()
 @Field final String CVE_URL = 'https://cve.mitre.org/cgi-bin/cvename.cgi?name='
 @Field final String INCLUDES_REPOSITORY_CONTENT = 'includesRepositoryContent'
 
-@Field final String PROPERTIES_FILE_PATH = 'plugins/whitesource-artifactory-plugin.properties'
+@Field final String PROPERTIES_FILE_PATH = 'whitesource-artifactory-plugin.properties'
 @Field final String AGENT_TYPE = 'artifactory-plugin'
 @Field final String PLUGIN_VERSION = '21.5.1'
 @Field final String AGENT_VERSION = '2.9.9.65'
-@Field final String ARCHIVE_EXTRACTION_DEPTH = 'archiveExtractionDepth'
-@Field final String OR = '|'
 @Field final int MAX_REPO_SIZE = 10000
 @Field final int MAX_REPO_SIZE_TO_UPLOAD = 2000
 
@@ -90,7 +85,7 @@ import static groovy.io.FileType.FILES
 @Field final String VULNERABILITY_SEVERITY = 'WSS-Vulnerability-Severity: '
 @Field final String VULNERABILITY_SCORE = 'WSS-Vulnerability-Score: '
 
-// File System Scanner
+// Unified Agent Scanner Utils
 @Field final int ARCHIVE_EXTRACTION_DEPTH_DEFAULT = 2
 @Field final int ARCHIVE_EXTRACTION_DEPTH_MIN = 1
 @Field final int ARCHIVE_EXTRACTION_DEPTH_MAX = 7
@@ -101,9 +96,11 @@ import static groovy.io.FileType.FILES
 @Field final String REMOTE = 'remote'
 @Field final String VIRTUAL = 'virtual'
 
-// Properties File Parameters
+// Plugin Properties File Parameters
 @Field final String USER_KEY = 'userKey'
 @Field final String PRODUCT_NAME = 'productName'
+@Field final String REPO_KEYS = 'repoKeys'
+@Field final String ARCHIVE_EXTRACTION_DEPTH = 'archiveExtractionDepth'
 @Field final String MAX_REPO_UPLOAD_WSS_SIZE = 'maxRepoUploadWssSize'
 @Field final String MAX_REPO_SCAN_SIZE = 'maxRepoScanSize'
 @Field final String TRIGGER_AFTER_CREATE = 'triggerAfterCreate'
@@ -118,8 +115,9 @@ import static groovy.io.FileType.FILES
  */
 download {
     beforeDownloadRequest { request, repoPath ->
-        def etcDir = getEtcDirectory()
-        def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
+        def config = new ConfigSlurper().parse(
+                new File(ctx.artifactoryHome.pluginsDir.getCanonicalPath
+                        (), PROPERTIES_FILE_PATH).toURI().toURL())
         boolean triggerBeforeDownload = isTriggerBeforeDownloadEnabled(config)
 
         if (triggerBeforeDownload) {
@@ -151,8 +149,8 @@ download {
     }
 
     beforeRemoteDownload { request, repoPath ->
-        def etcDir = getEtcDirectory()
-        def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
+        def config = new ConfigSlurper().parse(
+                new File(ctx.artifactoryHome.pluginsDir.getCanonicalPath(), PROPERTIES_FILE_PATH).toURI().toURL())
         boolean triggerBeforeDownload = isTriggerBeforeDownloadEnabled(config)
 
         if (triggerBeforeDownload) {
@@ -181,21 +179,6 @@ private def isTriggerBeforeDownloadEnabled(config) {
     triggerBeforeDownload
 }
 
-private def getEtcDirectory() {
-    // Before Artifactory 7.x the etc directory parameter name was 'haAwareEtcDir'
-    // In Artifactory 7.x and up it was changed to etcDir
-    def etcDir
-    def artifactoryVersion = ctx.versionProvider.originalHomeVersion.version.version
-    boolean isArtifactoryVersion7 = artifactoryVersion.startsWith("7.")
-    if (isArtifactoryVersion7) {
-        etcDir = ctx.artifactoryHome.etcDir
-    } else {
-        etcDir = ctx.artifactoryHome.haAwareEtcDir
-    }
-
-    etcDir
-}
-
 jobs {
     /**
      * How to set cron execution:
@@ -205,12 +188,12 @@ jobs {
      * "0 42 9 * * ?"  - Build a trigger that will fire daily at 9:42 am
      */
     updateRepoWithWhiteSource(cron: "0 28 13 * * ?") {
+        log.info("Starting job updateRepoWithWhiteSource By WhiteSource")
+        File tempFolder = new File(TEMP_ARTIFACTORY_DIRECTORY)
         try {
-            log.info("Starting job updateRepoWithWhiteSource By WhiteSource")
-
             // Get config properties from 'plugins/whitesource-artifactory-plugin.properties'
-            def etcDir = getEtcDirectory()
-            def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
+            def config = new ConfigSlurper().parse(
+                    new File(ctx.artifactoryHome.pluginsDir.getCanonicalPath(), PROPERTIES_FILE_PATH).toURI().toURL())
             CheckPolicyComplianceResult checkPoliciesResult = null
 
             // Get artifactory repositories names to scan from config file
@@ -236,7 +219,8 @@ jobs {
 
             // Loop over repositories names provided in config
             for (String repository : repositories) {
-                List<ItemInfo> archiveFilesList = new ArrayList<>()
+                File repoTempFolder = new File(tempFolder, repository)
+                List<RepoPath> archiveFilesList = new ArrayList<>()
                 Map<String, WssItemInfo> sha1ToItemMap = new HashMap<String, WssItemInfo>()
                 String productName = config.containsKey(PRODUCT_NAME) ? config.productName : repository
 
@@ -244,7 +228,7 @@ jobs {
                 // If file is archive then it will be added to archiveFilesList to extract it later
                 findAllRepositoryItems(RepoPathFactory.create(repository), sha1ToItemMap, archiveFilesList, archiveIncludes)
 
-                def archiveFilesDirectories = cloneArchiveFilesToTempDirectory(archiveFilesList, repository)
+                def archiveFilesDirectories = cloneArchiveFilesToTempDirectory(repoTempFolder, archiveFilesList)
                 archiveFilesList.clear() // clear list - it's not used after this step
 
                 int repoSize = sha1ToItemMap.size()
@@ -308,11 +292,12 @@ jobs {
                         break
                     }
                 }
-                deleteTemporaryFolders(archiveFilesDirectories)
+                deleteNonEmptyDirectory(repoTempFolder)
             }
         } catch (Exception e) {
             log.warn("Error while running whitesource-plugin: ", e)
         } finally {
+            deleteNonEmptyDirectory(tempFolder)
             log.info("Job updateRepoWithWhiteSource has Finished")
         }
     }
@@ -330,14 +315,11 @@ storage {
         try {
             if (!item.isFolder()) {
                 def triggerAfterCreate = true
-                def etcDir = getEtcDirectory()
-                def config = new ConfigSlurper().parse(new File(etcDir, PROPERTIES_FILE_PATH).toURL())
-
-                def archiveExtractionDepth = config.containsKey(ARCHIVE_EXTRACTION_DEPTH) ? config.get(ARCHIVE_EXTRACTION_DEPTH) : ARCHIVE_EXTRACTION_DEPTH_DEFAULT
-                archiveExtractionDepth = verifyArchiveExtractionDepth(archiveExtractionDepth)
+                def config = new ConfigSlurper().parse(
+                        new File(ctx.artifactoryHome.pluginsDir.getCanonicalPath(), PROPERTIES_FILE_PATH).toURI().toURL())
 
                 if (config.containsKey(TRIGGER_AFTER_CREATE)) {
-                    triggerBeforeDownload = config.triggerAfterCreate
+                    triggerAfterCreate = config.triggerAfterCreate
                 }
 
                 // Verify trigger after create is enabled in properties file
@@ -353,7 +335,7 @@ storage {
                         Set<String> allowedFileExtensions = new HashSet<String>()
                         def repoKey = item.getRepoKey()
                         Collection<AgentProjectInfo> projects = createProjects(sha1ToItemMap, repoKey, fileList,
-                                includesRepositoryContent, allowedFileExtensions, archiveExtractionDepth)
+                                includesRepositoryContent, allowedFileExtensions, 0)
 
                         WhitesourceService whitesourceService = createWhiteSourceService(config)
 
@@ -386,37 +368,18 @@ private String getUserKeyFromPropertiesFile(ConfigObject config, String USER_KEY
 
 /* --- Private Methods --- */
 
-private void deleteTemporaryFolders(List<File> compressedFilesFolder) {
-    try {
-        File fileExtractorTempFolder = new File(TEMP_DOWNLOAD_DIRECTORY + File.separator + "WhiteSource-ArchiveExtractor")
-        if (fileExtractorTempFolder.exists()) {
-            //the temp folder used by the WSS file agent is present.
-            deleteNonEmptyDirectory(fileExtractorTempFolder)
-        }
-
-        // Deleting compressed file and parent folder
-        if (compressedFilesFolder != null && compressedFilesFolder.size() > 0) {
-            for (int i = 0; i < compressedFilesFolder.size(); i++) {
-                File toRemove = compressedFilesFolder.get(i)
-                deleteNonEmptyDirectory(toRemove.getParentFile())
-            }
-        }
-    } catch (Exception e) {
-        log.warn("Error during deleting of whitesource temporary files " + e)
-    }
-}
-
-private boolean deleteNonEmptyDirectory(File dir) {
+private void deleteNonEmptyDirectory(File dir) {
     if (dir.isDirectory()) {
         File[] children = dir.listFiles()
         for (int i = 0; i < children.length; i++) {
-            boolean success = deleteNonEmptyDirectory(children[i])
-            if (!success) {
-                return false
-            }
+            deleteNonEmptyDirectory(children[i])
         }
     }
-    return dir.delete()
+
+    boolean deleteSucceeded = dir.delete();
+    if (!deleteSucceeded) {
+        log.warn("Failed to delete temp folder/file '" + dir.getCanonicalPath() + "'")
+    }
 }
 
 /*
@@ -580,40 +543,53 @@ private Collection<AgentProjectInfo> createProjects(Map<String, WssItemInfo> sha
 
         String[] archiveIncludesArray = archiveIncludesWithPrefix.toArray(new String[archiveIncludesWithPrefix.size()])
 
-        File compressedFile
         // If this repository item is archive file, Use UA to extract and scan contents (Files from 'includes' extension)
         for (int i = 0; i < archiveFilesDirectories.size(); i++) {
-            compressedFile = archiveFilesDirectories.get(i)
+            File compressedFile = archiveFilesDirectories.get(i)
 
             // If item is one fo the compressedFiles taken from repository
             if (compressedFile.getPath().toString().endsWith(itemName)) {
-
-                // Extract archive file
-                String[] exclude = [itemName]
-                def compressedFilesFolderCanonicalPath = compressedFile.getCanonicalPath()
-                ArchiveExtractor archiveExtractor = new ArchiveExtractor(archiveIncludesArray, new String[0], exclude, false);
-                String unpackDirectory = archiveExtractor.extractArchives(compressedFilesFolderCanonicalPath, archiveExtractionDepth, uncompressedArchiveDirectories);
-
-                new File(unpackDirectory).eachFileRecurse(FILES) {
-                    if (it.name.endsWithAny(includesExtensions)) {
-                        try {
-                            String fileSha1 = ChecksumUtils.calculateSHA1(it);
-                            DependencyInfo childDependencyInfo = new DependencyInfo(fileSha1)
-                            childDependencyInfo.setArtifactId(it.name)
-                            dependencyInfo.getChildren().add(childDependencyInfo)
-                        } catch (Exception e) {
-                            log.warn("Failed to calculate sha1 for '" + it.name + "'")
-                        }
-                    }
-                }
-
-                deleteNonEmptyDirectory(new File(unpackDirectory).getParentFile())
+                extractArchiveScanContents(itemName, compressedFile, archiveIncludesArray, archiveExtractionDepth,
+                        uncompressedArchiveDirectories, includesExtensions, dependencyInfo)
                 break
             }
         }
     }
     projectInfo.setDependencies(dependencies)
     return projects
+}
+
+private void extractArchiveScanContents(String itemName, File compressedFile, String[] archiveIncludesArray,
+                                        int archiveExtractionDepth, ArrayList<String> uncompressedArchiveDirectories,
+                                        String[] includesExtensions, DependencyInfo dependencyInfo) {
+    String unpackDirectory = null
+    try {
+        // Extract archive file
+        String[] exclude = [itemName]
+        def compressedFilesFolderCanonicalPath = compressedFile.getCanonicalPath()
+        ArchiveExtractor archiveExtractor = new ArchiveExtractor(archiveIncludesArray, new String[0], exclude, false);
+        unpackDirectory = archiveExtractor.extractArchives(compressedFilesFolderCanonicalPath, archiveExtractionDepth,
+                uncompressedArchiveDirectories)
+
+        new File(unpackDirectory).eachFileRecurse(FILES) {
+            if (it.name.endsWithAny(includesExtensions)) {
+                try {
+                    String fileSha1 = ChecksumUtils.calculateSHA1(it);
+                    DependencyInfo childDependencyInfo = new DependencyInfo(fileSha1)
+                    childDependencyInfo.setArtifactId(it.name)
+                    dependencyInfo.getChildren().add(childDependencyInfo)
+                } catch (Exception e) {
+                    log.warn("Failed to calculate sha1 for '" + it.name + "'")
+                }
+            }
+        }
+    } catch (Exception e) {
+        log.warn("Failed to extract archive file  '" + itemName + "'")
+    } finally {
+        if (unpackDirectory != null) {
+            deleteNonEmptyDirectory(new File(unpackDirectory).getParentFile().getParentFile())
+        }
+    }
 }
 
 private CheckPolicyComplianceResult checkWhiteSourceServicePolicyCompliance(WhitesourceService service, String orgToken, String product, String productVersion,
@@ -716,44 +692,44 @@ private void logResult(UpdateInventoryResult updateResult) {
 /*
  * Clone archive file from artifactory repository to local temp directory
  */
-private List<File> cloneArchiveFilesToTempDirectory(List archiveFilesList, String repository) throws IOException {
+
+private List<File> cloneArchiveFilesToTempDirectory(File tempFolder, List<RepoPath> archiveFilesList) throws IOException {
     List<File> listOfArchiveFiles = new ArrayList<>()
 
-    for (int i = 0; i < archiveFilesList.size(); i++) {
-        inputStream = null
-        dstArchiveFileOutputStream = null
-        def artifactName = archiveFilesList.get(i).getPath().substring(archiveFilesList.get(i).getPath().lastIndexOf(BACK_SLASH) + 1)
-        File destDir = new File(TEMP_DOWNLOAD_DIRECTORY + File.separator + repository + System.nanoTime() + File.separator + artifactName)
+    for (RepoPath archiveFile : archiveFilesList) {
+        String path = archiveFile.getPath()
 
-        if (!destDir.exists()) {
-            destDir.mkdirs()
+        File destDir = new File(Paths.get(tempFolder.getCanonicalPath(), path).toString())
+
+        if (!destDir.getParentFile().exists()) {
+            destDir.getParentFile().mkdirs()
         }
 
         // Copy repository archive file from artifactory to dst archive file
-        def inputStream
-        def dstArchiveFileOutputStream
+        def inputStream = null
+        def dstArchiveFileOutputStream = null
         try {
-            inputStream = repositories.getContent(archiveFilesList.get(i)).getInputStream()
-            dstArchiveFileOutputStream = new File(destDir.getPath() + File.separator + artifactName).newOutputStream()
+            inputStream = repositories.getContent(archiveFile).getInputStream()
+            dstArchiveFileOutputStream = destDir.newOutputStream()
 
             dstArchiveFileOutputStream << inputStream
+
+            listOfArchiveFiles.add(destDir)
         } finally {
-            if (inputStream != null) {
-                try {
-                    inputStream.close()
-                } catch (Exception e) {
-                }
-            }
-            if (dstArchiveFileOutputStream != null) {
-                try {
-                    dstArchiveFileOutputStream.close()
-                } catch (Exception e) {
-                }
-            }
+            closeStream(inputStream)
+            closeStream(dstArchiveFileOutputStream)
         }
-        listOfArchiveFiles.add(destDir)
     }
     return listOfArchiveFiles
+}
+
+private static void closeStream(def stream) {
+    if (stream != null) {
+        try {
+            stream.close()
+        } catch (Exception e) {
+        }
+    }
 }
 
 private String[] buildDefaults() {
@@ -782,8 +758,8 @@ private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rke
     String userKey = getUserKeyFromPropertiesFile(config, USER_KEY)
 
     log.info("Checking policies")
-    CheckPolicyComplianceResult checkPoliciesResult = checkWhiteSourceServicePolicyCompliance(whitesourceService, config.apiKey,
-            productName, BLANK, projects, false, userKey)
+    CheckPolicyComplianceResult checkPoliciesResult = checkWhiteSourceServicePolicyCompliance(whitesourceService,
+            config.apiKey, productName, BLANK, projects, false, userKey)
 
     def name = ''
     if (checkPoliciesResult != null) {
@@ -796,7 +772,7 @@ private void createProjectAndCheckPolicyForDownload(def rpath, def sha1, def rke
                     name = child.getPolicy().getDisplayName()
                 }
             }
-//            def status = 409
+
             def status = 403
             def message = "'${artifactName}' artifact did not conform with WhiteSource policy '${name}'"
             log.warn message
